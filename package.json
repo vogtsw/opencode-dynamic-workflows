@@ -1,0 +1,39 @@
+{
+  "name": "opencode-dynamic-workflows",
+  "version": "1.0.0",
+  "description": "OpenCode plugin for dynamic multi-agent workflows via JSON DSL",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "bun test",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "workflow",
+    "multi-agent",
+    "subagent",
+    "dynamic-workflows"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.15.13"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}
