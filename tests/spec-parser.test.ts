@@ -152,6 +152,44 @@ describe("normalizeSpec", () => {
     expect(spec.phases[0].tasks[0].agent).toBe("build")
     expect(spec.phases[0].tasks[0].model).toBe("anthropic/claude-haiku")
   })
+
+  it("accepts model-generated aliases for phase and task names", () => {
+    const raw = {
+      name: "kernelagent-langgraph-analysis",
+      goal: "Analyze KernelAgent and map it to LangGraph",
+      phases: [
+        {
+          name: "parallel_research",
+          type: "parallel",
+          tasks: [
+            {
+              name: "core_pipeline_flow",
+              description: "Trace the core pipeline",
+              prompt: "Read the core pipeline files and report the flow.",
+            },
+          ],
+        },
+        {
+          name: "verification",
+          type: "sequential",
+          tasks: [
+            {
+              name: "crosscheck",
+              prompt: "Verify the flow analysis.",
+            },
+          ],
+        },
+      ],
+    }
+
+    const spec = normalizeSpec(raw)
+    expect(spec.phases[0].id).toBe("parallel_research")
+    expect(spec.phases[0].strategy).toBe("parallel")
+    expect(spec.phases[0].tasks[0].id).toBe("core_pipeline_flow")
+    expect(spec.phases[1].id).toBe("verification")
+    expect(spec.phases[1].strategy).toBe("sequential")
+    expect(spec.phases[1].tasks[0].id).toBe("crosscheck")
+  })
 })
 
 describe("generateDefaultSpec", () => {

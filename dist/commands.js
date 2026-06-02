@@ -11,6 +11,29 @@ After designing the spec, call the workflow_run tool with:
 - goal: a concise goal string
 - spec: the JSON workflow specification
 
+The spec MUST use this exact schema:
+\`\`\`json
+{
+  "name": "short-workflow-name",
+  "goal": "the user goal",
+  "phases": [
+    {
+      "id": "phase_id",
+      "title": "Phase title",
+      "strategy": "parallel",
+      "tasks": [
+        {
+          "id": "task_id",
+          "description": "Short task description",
+          "prompt": "A self-contained worker prompt"
+        }
+      ],
+      "synthesisPrompt": "Optional prompt to combine this phase's task outputs"
+    }
+  ]
+}
+\`\`\`
+
 Guidelines for the spec:
 - Use "parallel" strategy for independent research/analysis tasks
 - Use "sequential" strategy when tasks depend on each other
@@ -35,6 +58,43 @@ Design and call workflow_run with a spec that has at least:
 - A parallel research phase with 2-5 task angles
 - A synthesis prompt that cross-checks findings and resolves contradictions
 - Optionally a sequential verification phase
+
+The spec MUST use this exact JSON DSL:
+\`\`\`json
+{
+  "name": "deep-research-topic",
+  "goal": "research question",
+  "phases": [
+    {
+      "id": "parallel_research",
+      "title": "Parallel Research",
+      "strategy": "parallel",
+      "tasks": [
+        {
+          "id": "angle_one",
+          "description": "Research angle one",
+          "prompt": "Self-contained instructions for this worker"
+        }
+      ],
+      "synthesisPrompt": "Cross-check all findings, resolve contradictions, and summarize."
+    },
+    {
+      "id": "verification",
+      "title": "Verification",
+      "strategy": "sequential",
+      "tasks": [
+        {
+          "id": "verify_findings",
+          "description": "Verify the synthesis",
+          "prompt": "Check the previous synthesis for gaps and edge cases."
+        }
+      ]
+    }
+  ]
+}
+\`\`\`
+
+Use \`id\` for phase/task identifiers and \`strategy\` for phase execution. Do not use \`type\` as the strategy field.
 
 Do NOT rely on WebSearch being available - tasks should use available tools only.`,
         };

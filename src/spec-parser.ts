@@ -72,11 +72,17 @@ function normalizePhase(raw: unknown, index: number, issues: string[]): Phase {
   }
 
   const obj = raw as Record<string, unknown>
-  const id = typeof obj.id === "string" && obj.id.trim() ? obj.id.trim() : `phase_${index}`
+  const id =
+    typeof obj.id === "string" && obj.id.trim()
+      ? obj.id.trim()
+      : typeof obj.name === "string" && obj.name.trim()
+        ? obj.name.trim()
+        : `phase_${index}`
   const title = typeof obj.title === "string" && obj.title.trim() ? obj.title.trim() : id
 
   let strategy: "parallel" | "sequential" = "parallel"
-  if (obj.strategy === "sequential") strategy = "sequential"
+  const rawStrategy = obj.strategy ?? obj.type
+  if (rawStrategy === "sequential") strategy = "sequential"
 
   let tasks: Task[] = []
   if (Array.isArray(obj.tasks)) {
@@ -105,7 +111,12 @@ function normalizeTask(raw: unknown, index: number, phaseId: string, issues: str
   }
 
   const obj = raw as Record<string, unknown>
-  const id = typeof obj.id === "string" && obj.id.trim() ? obj.id.trim() : `${phaseId}_task_${index}`
+  const id =
+    typeof obj.id === "string" && obj.id.trim()
+      ? obj.id.trim()
+      : typeof obj.name === "string" && obj.name.trim()
+        ? obj.name.trim()
+        : `${phaseId}_task_${index}`
   const description = typeof obj.description === "string" && obj.description.trim()
     ? obj.description.trim()
     : id

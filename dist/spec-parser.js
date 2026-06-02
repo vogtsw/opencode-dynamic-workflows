@@ -61,10 +61,15 @@ function normalizePhase(raw, index, issues) {
         return { id, title: id, strategy: "parallel", tasks: [] };
     }
     const obj = raw;
-    const id = typeof obj.id === "string" && obj.id.trim() ? obj.id.trim() : `phase_${index}`;
+    const id = typeof obj.id === "string" && obj.id.trim()
+        ? obj.id.trim()
+        : typeof obj.name === "string" && obj.name.trim()
+            ? obj.name.trim()
+            : `phase_${index}`;
     const title = typeof obj.title === "string" && obj.title.trim() ? obj.title.trim() : id;
     let strategy = "parallel";
-    if (obj.strategy === "sequential")
+    const rawStrategy = obj.strategy ?? obj.type;
+    if (rawStrategy === "sequential")
         strategy = "sequential";
     let tasks = [];
     if (Array.isArray(obj.tasks)) {
@@ -89,7 +94,11 @@ function normalizeTask(raw, index, phaseId, issues) {
         return { id, description: id, prompt: "complete the task" };
     }
     const obj = raw;
-    const id = typeof obj.id === "string" && obj.id.trim() ? obj.id.trim() : `${phaseId}_task_${index}`;
+    const id = typeof obj.id === "string" && obj.id.trim()
+        ? obj.id.trim()
+        : typeof obj.name === "string" && obj.name.trim()
+            ? obj.name.trim()
+            : `${phaseId}_task_${index}`;
     const description = typeof obj.description === "string" && obj.description.trim()
         ? obj.description.trim()
         : id;
