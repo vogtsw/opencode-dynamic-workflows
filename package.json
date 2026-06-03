@@ -18,7 +18,8 @@
   "scripts": {
     "build": "tsc",
     "test": "bun test",
-    "prepublishOnly": "npm run build"
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run build && npm test"
   },
   "keywords": [
     "opencode",
@@ -29,6 +30,18 @@
     "dynamic-workflows"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vogtsw/opencode-dynamic-workflows.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vogtsw/opencode-dynamic-workflows/issues"
+  },
+  "homepage": "https://github.com/vogtsw/opencode-dynamic-workflows#readme",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "dependencies": {
     "@opencode-ai/plugin": "^1.15.13"
   },

@@ -25,9 +25,23 @@ The implementation intentionally uses a safe JSON DSL instead of executing arbit
 - Bun or npm for local development
 - At least one configured OpenCode model provider
 
-## Quick Install
+## Install with OpenCode Plugin
 
-After publishing to npm, add the package name to your OpenCode config:
+After the package is published to npm, install it with OpenCode's plugin installer:
+
+```bash
+opencode plugin opencode-dynamic-workflows --global
+```
+
+Use `--force` when upgrading an existing install:
+
+```bash
+opencode plugin opencode-dynamic-workflows --global --force
+```
+
+Restart OpenCode after installation. The installer downloads the npm package and updates your global OpenCode config.
+
+Equivalent manual config:
 
 ```jsonc
 {
@@ -36,7 +50,7 @@ After publishing to npm, add the package name to your OpenCode config:
 }
 ```
 
-Restart OpenCode after changing the config.
+> Note: `opencode plugin` installs npm modules. For local development or unpublished commits, use the local path setup below.
 
 ## Install From GitHub
 
@@ -49,7 +63,7 @@ bun install
 bun run build
 ```
 
-Then reference the local path in `opencode.json`:
+Then reference the local path in `opencode.json`. This is the recommended development install before a release is published to npm:
 
 ```jsonc
 {
@@ -65,12 +79,6 @@ On Windows, use an escaped absolute path:
   "$schema": "https://opencode.ai/config.json",
   "plugin": ["D:\\test\\mygithub\\opencode-dynamic-workflows"]
 }
-```
-
-You can also install it with OpenCode's plugin installer:
-
-```bash
-opencode plugin /absolute/path/to/opencode-dynamic-workflows --global --force
 ```
 
 ## Share As A Tarball
@@ -100,22 +108,43 @@ Send that `.tgz` file to another user. They can unpack it or install it into a s
 
 ## Publish To npm
 
-Before publishing:
+This repository includes a GitHub Actions workflow at `.github/workflows/publish-npm.yml`.
+
+To make every release installable through `opencode plugin`:
+
+1. Create an npm automation token with publish access.
+2. Add it to the GitHub repository secrets as `NPM_TOKEN`.
+3. Bump `package.json`'s `version`.
+4. Merge the release commit.
+5. Create and publish a GitHub Release for the matching tag.
+
+When the GitHub Release is published, the workflow runs:
+
+```text
+bun install --frozen-lockfile
+bun test
+bun run build
+npm pack --dry-run
+npm publish --access public
+```
+
+After npm publish completes, users can install the release with:
+
+```bash
+opencode plugin opencode-dynamic-workflows --global --force
+```
+
+Manual publish flow:
 
 ```bash
 bun install
 bun run build
 bun test
 npm pack --dry-run
-```
-
-Then publish:
-
-```bash
 npm publish
 ```
 
-After publishing, other users can install it by adding this to their OpenCode config:
+After publishing, other users can also install it by adding this to their OpenCode config:
 
 ```jsonc
 {
