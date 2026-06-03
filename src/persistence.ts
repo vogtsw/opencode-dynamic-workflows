@@ -140,7 +140,7 @@ export async function loadRun(worktree: string, runId: string): Promise<RunResul
   }
 }
 
-export async function listRuns(worktree: string): Promise<{ runId: string; name: string; status: string; startedAt: number }[]> {
+export async function listRuns(worktree: string): Promise<{ runId: string; name: string; status: string; startedAt: number; progress?: string }[]> {
   const dir = runsDir(worktree)
   let entries: { name: string }[]
   try {
@@ -149,7 +149,7 @@ export async function listRuns(worktree: string): Promise<{ runId: string; name:
     return []
   }
 
-  const items: { runId: string; name: string; status: string; startedAt: number }[] = []
+  const items: { runId: string; name: string; status: string; startedAt: number; progress?: string }[] = []
   for (const entry of entries) {
     const name = typeof entry === "string" ? entry : entry.name
     if (!name.endsWith(".json")) continue
@@ -165,6 +165,9 @@ export async function listRuns(worktree: string): Promise<{ runId: string; name:
         name: run.spec.name,
         status: run.status,
         startedAt: run.startedAt,
+        progress: run.progress
+          ? `${run.progress.message} (${(run.progress.taskCompleted ?? 0) + (run.progress.taskFailed ?? 0) + (run.progress.taskSkipped ?? 0)}/${run.progress.taskTotal} done, ${run.progress.taskRunning ?? 0} running, ${run.progress.taskFailed ?? 0} failed)`
+          : undefined,
       })
     } catch {
       // Skip unreadable files

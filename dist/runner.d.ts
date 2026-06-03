@@ -1,5 +1,5 @@
 import type { createOpencodeClient } from "@opencode-ai/sdk";
-import type { WorkflowSpec, RunResult } from "./types.js";
+import type { WorkflowSpec, RunResult, WorkflowProgress } from "./types.js";
 export type SDKClient = ReturnType<typeof createOpencodeClient>;
 export interface RunnerConfig {
     client: SDKClient;
@@ -11,5 +11,6 @@ export interface RunnerConfig {
     defaultAgent?: string;
     defaultModel?: string;
     abort?: AbortSignal;
+    onProgress?: (progress: WorkflowProgress) => void | Promise<void>;
 }
 export declare function runWorkflow(spec: WorkflowSpec, config: RunnerConfig): Promise<RunResult>;

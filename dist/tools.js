@@ -3,6 +3,68 @@ import { runWorkflow } from "./runner.js";
 import { normalizeSpec, generateDefaultSpec, countTasks, validateOptions } from "./spec-parser.js";
 import { saveSpec, loadSpec, listSavedWorkflows, getSavedWorkflow, listRuns } from "./persistence.js";
 import { generateReport, generateDryRunReport, generateListOutput } from "./report.js";
+function progressTitle(progress) {
+    const done = progress.taskCompleted + progress.taskFailed + progress.taskSkipped;
+    const failed = progress.taskFailed > 0 ? `, ${progress.taskFailed} failed` : "";
+    const running = progress.taskRunning > 0 ? `, ${progress.taskRunning} running` : "";
+    const taskPart = progress.taskTotal > 0 ? `${done}/${progress.taskTotal} done${running}${failed}` : progress.status;
+    return `Workflow ${taskPart}: ${progress.message}`;
+}
+function progressMetadata(progress) {
+    const done = progress.taskCompleted + progress.taskFailed + progress.taskSkipped;
+    return {
+        runId: progress.runId,
+        status: progress.status,
+        message: progress.message,
+        progress: progress.taskTotal > 0 ? `${done}/${progress.taskTotal}` : progress.status,
+        completed: progress.taskCompleted,
+        running: progress.taskRunning,
+        failed: progress.taskFailed,
+        skipped: progress.taskSkipped,
+        total: progress.taskTotal,
+        phase: `${progress.phaseIndex}/${progress.phaseTotal}`,
+        currentPhaseId: progress.currentPhaseId,
+        currentPhaseTitle: progress.currentPhaseTitle,
+        currentTaskId: progress.currentTaskId,
+        currentTaskDescription: progress.currentTaskDescription,
+        updatedAt: new Date(progress.updatedAt).toISOString(),
+    };
+}
+function shouldToast(progress) {
+    if (progress.status !== "running")
+        return true;
+    if (/^Phase \d+\/\d+:/.test(progress.message))
+        return true;
+    return /^Task (completed|failed|skipped):/.test(progress.message);
+}
+async function notifyProgress(client, context, progress) {
+    const title = progressTitle(progress);
+    context.metadata({
+        title,
+        metadata: progressMetadata(progress),
+    });
+    if (!shouldToast(progress))
+        return;
+    try {
+        await client.tui.showToast({
+            query: { directory: context.directory },
+            body: {
+                title: "Workflow progress",
+                message: title,
+                variant: progress.status === "failed" ? "error" : progress.status === "completed" ? "success" : "info",
+                duration: 2500,
+            },
+        });
+    }
+    catch {
+        // TUI notifications are best-effort; headless `opencode run` may not have a visible TUI.
+    }
+}
+function finalTitle(progress) {
+    if (!progress)
+        return undefined;
+    return progressTitle(progress);
+}
 export function createWorkflowRunTool(opts) {
     const { client } = opts;
     return tool({
@@ -58,15 +120,20 @@ export function createWorkflowRunTool(opts) {
                 sessionID: context.sessionID,
                 concurrency: c,
                 maxAgents: m,
-                defaultAgent: agent,
+                defaultAgent: agent ?? context.agent,
                 defaultModel: model,
                 abort: context.abort,
+                onProgress: (progress) => notifyProgress(client, context, progress),
             };
             const result = await runWorkflow(spec, runnerConfig);
             if (saveAs) {
                 await saveSpec(context.worktree, spec);
             }
-            return generateReport(result);
+            return {
+                title: finalTitle(result.progress),
+                output: generateReport(result),
+                metadata: result.progress ? progressMetadata(result.progress) : undefined,
+            };
         },
     });
 }
@@ -81,8 +148,11 @@ export function createWorkflowListTool(_opts) {
             if (runs.length > 0) {
                 output += "\n## Recent Runs\n\n";
                 for (const run of runs.slice(0, 10)) {
-                    const icon = run.status === "completed" ? "[ok]" : run.status === "failed" ? "[fail]" : "[partial]";
+                    const icon = run.status === "completed" ? "[ok]" : run.status === "failed" ? "[fail]" : run.status === "running" ? "[run]" : "[partial]";
                     output += `- ${icon} **${run.name}** - \`${run.runId}\` - ${new Date(run.startedAt).toISOString()}\n`;
+                    if (run.status === "running" && run.progress) {
+                        output += `  Progress: ${run.progress}\n`;
+                    }
                 }
             }
             return output;
@@ -118,13 +188,18 @@ export function createWorkflowRunSavedTool(opts) {
                 sessionID: context.sessionID,
                 concurrency: c,
                 maxAgents: m,
-                defaultAgent: agent,
+                defaultAgent: agent ?? context.agent,
                 defaultModel: model,
                 abort: context.abort,
+                onProgress: (progress) => notifyProgress(client, context, progress),
             };
             const result = await runWorkflow(spec, runnerConfig);
             await saveSpec(context.worktree, spec);
-            return generateReport(result);
+            return {
+                title: finalTitle(result.progress),
+                output: generateReport(result),
+                metadata: result.progress ? progressMetadata(result.progress) : undefined,
+            };
         },
     });
 }

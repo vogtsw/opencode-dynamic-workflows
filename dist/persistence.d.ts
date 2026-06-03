@@ -11,5 +11,6 @@ export declare function listRuns(worktree: string): Promise<{
     name: string;
     status: string;
     startedAt: number;
+    progress?: string;
 }[]>;
 export declare function generateRunId(): string;

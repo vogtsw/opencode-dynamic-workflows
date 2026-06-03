@@ -18,6 +18,7 @@ export interface Task {
     model?: string;
 }
 export type TaskStatus = "pending" | "running" | "completed" | "failed" | "skipped";
+export type RunStatus = "running" | "completed" | "failed" | "partial";
 export interface TaskResult {
     taskId: string;
     sessionId: string;
@@ -40,10 +41,28 @@ export interface RunResult {
     runId: string;
     spec: WorkflowSpec;
     phaseResults: PhaseResult[];
-    status: "completed" | "failed" | "partial";
+    status: RunStatus;
     elapsedMs: number;
     startedAt: number;
-    finishedAt: number;
+    finishedAt?: number;
+    progress?: WorkflowProgress;
+}
+export interface WorkflowProgress {
+    runId: string;
+    status: RunStatus;
+    message: string;
+    phaseIndex: number;
+    phaseTotal: number;
+    taskCompleted: number;
+    taskRunning: number;
+    taskFailed: number;
+    taskSkipped: number;
+    taskTotal: number;
+    currentPhaseId?: string;
+    currentPhaseTitle?: string;
+    currentTaskId?: string;
+    currentTaskDescription?: string;
+    updatedAt: number;
 }
 export interface RunOptions {
     goal: string;

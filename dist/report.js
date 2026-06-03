@@ -1,7 +1,7 @@
 export function generateReport(result) {
     const lines = [];
     const { spec, phaseResults, runId, status, elapsedMs, startedAt } = result;
-    const statusIcon = status === "completed" ? "[ok]" : status === "failed" ? "[fail]" : "[partial]";
+    const statusIcon = status === "completed" ? "[ok]" : status === "failed" ? "[fail]" : status === "running" ? "[run]" : "[partial]";
     const elapsed = formatElapsed(elapsedMs);
     lines.push(`# Workflow: ${spec.name}`);
     lines.push("");

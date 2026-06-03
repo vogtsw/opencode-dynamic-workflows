@@ -154,6 +154,9 @@ export async function listRuns(worktree) {
                 name: run.spec.name,
                 status: run.status,
                 startedAt: run.startedAt,
+                progress: run.progress
+                    ? `${run.progress.message} (${(run.progress.taskCompleted ?? 0) + (run.progress.taskFailed ?? 0) + (run.progress.taskSkipped ?? 0)}/${run.progress.taskTotal} done, ${run.progress.taskRunning ?? 0} running, ${run.progress.taskFailed ?? 0} failed)`
+                    : undefined,
             });
         }
         catch {
