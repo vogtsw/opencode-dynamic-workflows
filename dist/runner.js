@@ -26,14 +26,25 @@ function extractText(parts) {
 }
 function extractNativeTaskOutput(parts) {
     const toolPart = [...parts].reverse().find((p) => p.type === "tool" && p.tool === "task");
+    const status = toolPart?.state?.status;
     const output = toolPart?.state?.output;
+    const error = toolPart?.state?.error;
     const sessionId = toolPart?.state?.metadata?.sessionId;
-    if (typeof output !== "string")
-        return { output: "", sessionId };
+    const failed = status === "error" || typeof error === "string";
+    if (typeof output !== "string") {
+        return {
+            output: "",
+            sessionId,
+            failed,
+            error: typeof error === "string" ? error : failed ? "Native subtask failed" : undefined,
+        };
+    }
     const match = output.match(/<task_result>\s*([\s\S]*?)\s*<\/task_result>/);
     return {
         output: (match?.[1] ?? output).trim(),
         sessionId,
+        failed,
+        error: typeof error === "string" ? error : undefined,
     };
 }
 async function runTask(client, task, directory, parentID, defaultAgent, defaultModel, phaseContext, abort, onProgress) {
@@ -83,7 +94,9 @@ async function runTask(client, task, directory, parentID, defaultAgent, defaultM
                 },
             });
         }
-        catch {
+        catch (err) {
+            if (abort.aborted)
+                throw err;
             response = await client.session.prompt({
                 path: { id: sessionId },
                 query: { directory },
@@ -100,14 +113,14 @@ async function runTask(client, task, directory, parentID, defaultAgent, defaultM
         const nativeTask = extractNativeTaskOutput(parts);
         const output = nativeTask.output || extractText(parts);
         const info = response.data.info;
-        const failed = info.error !== undefined;
+        const failed = info.error !== undefined || nativeTask.failed || abort.aborted;
         const result = {
             taskId: task.id,
             sessionId: nativeTask.sessionId ?? sessionId,
             status: failed ? "failed" : "completed",
             output,
             elapsedMs: elapsed,
-            error: failed ? info.error?.data?.message ?? "Task failed" : undefined,
+            error: failed ? info.error?.data?.message ?? nativeTask.error ?? (abort.aborted ? "Task aborted" : "Task failed") : undefined,
         };
         await onProgress?.(task, result.status, sessionId);
         return result;
@@ -164,6 +177,18 @@ async function executeParallelTasks(client, tasks, directory, parentID, defaultA
     }
     const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, () => runNext());
     await Promise.all(workers);
+    for (const task of pending) {
+        const result = {
+            taskId: task.id,
+            sessionId: "",
+            status: "skipped",
+            output: "",
+            elapsedMs: 0,
+            error: abort.aborted ? "Task skipped after workflow abort" : undefined,
+        };
+        results.push(result);
+        await onTaskProgress?.(task, "skipped", "");
+    }
     return results;
 }
 async function executePhase(client, phase, directory, parentID, defaultAgent, defaultModel, phaseContext, concurrency, abort, onTaskProgress, onSynthesisProgress) {
@@ -180,7 +205,9 @@ async function executePhase(client, phase, directory, parentID, defaultAgent, de
                     status: "skipped",
                     output: "",
                     elapsedMs: 0,
+                    error: "Task skipped after workflow abort",
                 });
+                await onTaskProgress?.(task, "skipped", "");
                 continue;
             }
             const result = await runTask(client, task, directory, parentID, defaultAgent, defaultModel, phaseContext, abort, onTaskProgress);
@@ -205,8 +232,11 @@ async function executePhase(client, phase, directory, parentID, defaultAgent, de
     const elapsed = Date.now() - start;
     const failedCount = taskResults.filter((t) => t.status === "failed").length;
     const completedCount = taskResults.filter((t) => t.status === "completed").length;
+    const skippedCount = taskResults.filter((t) => t.status === "skipped").length;
     let status;
-    if (failedCount === 0)
+    if (taskResults.length === 0 && phase.tasks.length > 0)
+        status = "failed";
+    else if (failedCount === 0 && skippedCount === 0 && taskResults.length === phase.tasks.length)
         status = "completed";
     else if (completedCount === 0)
         status = "failed";
@@ -305,7 +335,12 @@ export async function runWorkflow(spec, config) {
         result.elapsedMs = Date.now() - startedAt;
         result.progress = progress;
         await saveRun(worktree, result);
-        await config.onProgress?.(progress);
+        try {
+            await config.onProgress?.(progress);
+        }
+        catch {
+            // Progress UI updates are best-effort; persisted run state is the source of truth.
+        }
     }
     await publish(`Starting workflow "${spec.name}"`);
     for (let i = 0; i < spec.phases.length; i += 1) {

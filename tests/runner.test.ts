@@ -21,7 +21,7 @@ async function tempRoot() {
   return root
 }
 
-function createMockClient(options: { delayMs?: number; failTask?: string } = {}) {
+function createMockClient(options: { delayMs?: number; failTask?: string; nativeTaskError?: string } = {}) {
   let nextSession = 0
   let active = 0
   let maxActive = 0
@@ -43,6 +43,28 @@ function createMockClient(options: { delayMs?: number; failTask?: string } = {})
         const text = input.body.parts[0].text ?? input.body.parts[0].prompt
         if (options.failTask && text.includes(options.failTask)) {
           throw new Error(`boom ${options.failTask}`)
+        }
+
+        if (options.nativeTaskError && text.includes(options.nativeTaskError)) {
+          return {
+            data: {
+              info: {},
+              parts: [
+                {
+                  id: `part-${prompts.length}`,
+                  sessionID: input.path.id,
+                  messageID: `message-${prompts.length}`,
+                  type: "tool",
+                  tool: "task",
+                  state: {
+                    status: "error",
+                    error: `cancelled ${options.nativeTaskError}`,
+                    metadata: { sessionId: `native-${input.path.id}` },
+                  },
+                },
+              ],
+            },
+          }
         }
 
         return {
@@ -184,6 +206,34 @@ describe("runWorkflow", () => {
     const failed = result.phaseResults[0].taskResults.find((task) => task.taskId === "bad")
     expect(failed?.status).toBe("failed")
     expect(failed?.error).toContain("boom fail-marker")
+  })
+
+  it("marks native subtask tool errors as failed", async () => {
+    const spec = normalizeSpec({
+      name: "native-failure-test",
+      goal: "capture native task failure",
+      phases: [
+        {
+          id: "p1",
+          tasks: [{ id: "bad", prompt: "please native-fail-marker" }],
+        },
+      ],
+    })
+    const root = await tempRoot()
+    const { client } = createMockClient({ nativeTaskError: "native-fail-marker" })
+
+    const result = await runWorkflow(spec, {
+      client,
+      directory: root,
+      worktree: root,
+      sessionID: "parent",
+    })
+
+    expect(result.status).toBe("failed")
+    expect(result.phaseResults[0].taskResults[0].status).toBe("failed")
+    expect(result.phaseResults[0].taskResults[0].sessionId).toBe("native-session-1")
+    expect(result.phaseResults[0].taskResults[0].error).toContain("cancelled native-fail-marker")
+    expect(result.progress?.status).toBe("failed")
   })
 
   it("publishes progress and persists a running run record", async () => {

@@ -53,16 +53,28 @@ function extractText(parts: Part[]): string {
     .trim()
 }
 
-function extractNativeTaskOutput(parts: Part[]): { output: string; sessionId?: string } {
+function extractNativeTaskOutput(parts: Part[]): { output: string; sessionId?: string; failed: boolean; error?: string } {
   const toolPart = [...parts].reverse().find((p: any) => p.type === "tool" && p.tool === "task") as any
+  const status = toolPart?.state?.status
   const output = toolPart?.state?.output
+  const error = toolPart?.state?.error
   const sessionId = toolPart?.state?.metadata?.sessionId
-  if (typeof output !== "string") return { output: "", sessionId }
+  const failed = status === "error" || typeof error === "string"
+  if (typeof output !== "string") {
+    return {
+      output: "",
+      sessionId,
+      failed,
+      error: typeof error === "string" ? error : failed ? "Native subtask failed" : undefined,
+    }
+  }
 
   const match = output.match(/<task_result>\s*([\s\S]*?)\s*<\/task_result>/)
   return {
     output: (match?.[1] ?? output).trim(),
     sessionId,
+    failed,
+    error: typeof error === "string" ? error : undefined,
   }
 }
 
@@ -128,7 +140,8 @@ async function runTask(
           ],
         },
       })
-    } catch {
+    } catch (err) {
+      if (abort.aborted) throw err
       response = await client.session.prompt({
         path: { id: sessionId },
         query: { directory },
@@ -147,7 +160,7 @@ async function runTask(
     const output = nativeTask.output || extractText(parts)
 
     const info = response.data!.info
-    const failed = info.error !== undefined
+    const failed = info.error !== undefined || nativeTask.failed || abort.aborted
 
     const result: TaskResult = {
       taskId: task.id,
@@ -155,7 +168,7 @@ async function runTask(
       status: failed ? "failed" : "completed",
       output,
       elapsedMs: elapsed,
-      error: failed ? (info.error as any)?.data?.message ?? "Task failed" : undefined,
+      error: failed ? (info.error as any)?.data?.message ?? nativeTask.error ?? (abort.aborted ? "Task aborted" : "Task failed") : undefined,
     }
     await onProgress?.(task, result.status, sessionId)
     return result
@@ -241,6 +254,19 @@ async function executeParallelTasks(
   const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, () => runNext())
   await Promise.all(workers)
 
+  for (const task of pending) {
+    const result: TaskResult = {
+      taskId: task.id,
+      sessionId: "",
+      status: "skipped",
+      output: "",
+      elapsedMs: 0,
+      error: abort.aborted ? "Task skipped after workflow abort" : undefined,
+    }
+    results.push(result)
+    await onTaskProgress?.(task, "skipped", "")
+  }
+
   return results
 }
 
@@ -272,7 +298,9 @@ async function executePhase(
           status: "skipped",
           output: "",
           elapsedMs: 0,
+          error: "Task skipped after workflow abort",
         })
+        await onTaskProgress?.(task, "skipped", "")
         continue
       }
       const result = await runTask(client, task, directory, parentID, defaultAgent, defaultModel, phaseContext, abort, onTaskProgress)
@@ -319,9 +347,11 @@ async function executePhase(
   const elapsed = Date.now() - start
   const failedCount = taskResults.filter((t) => t.status === "failed").length
   const completedCount = taskResults.filter((t) => t.status === "completed").length
+  const skippedCount = taskResults.filter((t) => t.status === "skipped").length
 
   let status: "completed" | "failed" | "partial"
-  if (failedCount === 0) status = "completed"
+  if (taskResults.length === 0 && phase.tasks.length > 0) status = "failed"
+  else if (failedCount === 0 && skippedCount === 0 && taskResults.length === phase.tasks.length) status = "completed"
   else if (completedCount === 0) status = "failed"
   else status = "partial"
 
@@ -426,7 +456,11 @@ export async function runWorkflow(spec: WorkflowSpec, config: RunnerConfig): Pro
     result.elapsedMs = Date.now() - startedAt
     result.progress = progress
     await saveRun(worktree, result)
-    await config.onProgress?.(progress)
+    try {
+      await config.onProgress?.(progress)
+    } catch {
+      // Progress UI updates are best-effort; persisted run state is the source of truth.
+    }
   }
 
   await publish(`Starting workflow "${spec.name}"`)
