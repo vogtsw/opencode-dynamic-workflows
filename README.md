@@ -10,12 +10,17 @@ The implementation intentionally uses a safe JSON DSL instead of executing arbit
 
 - `workflow_run` tool for running JSON-defined multi-agent workflows
 - `workflow_list`, `workflow_show`, and `workflow_run_saved` tools for saved workflows
+- `workflow_resume` tool for resuming partial/failed runs without re-running completed tasks
 - Automatic `/workflow` command injection
 - Automatic `/deep-research` command injection
 - Parallel and sequential workflow phases
 - Optional phase synthesis workers
+- Per-task `retries` and `timeoutMs` failure handling
+- ASCII timeline (Gantt-style) in the final report showing task parallelism
+- Live per-task status tree with elapsed times in tool metadata
 - Worker recursion protection by disabling workflow tools inside child sessions
 - Concurrency and total-agent limits
+- Context accumulation limits to protect worker context windows
 - Run history persisted to `.opencode/workflows/runs/`
 - Saved workflow specs persisted to `.opencode/workflows/`
 
@@ -185,6 +190,7 @@ workflow_run
 workflow_list
 workflow_run_saved
 workflow_show
+workflow_resume
 ```
 
 Run a dry-run smoke test:
@@ -249,6 +255,18 @@ Shows a saved workflow spec.
 ### `workflow_run_saved`
 
 Loads a saved workflow by name and runs it.
+
+### `workflow_resume`
+
+Resumes a previous run by `runId`. Completed tasks are skipped and their saved outputs are reused; failed and skipped tasks are re-executed. The resumed run keeps the original `runId` and updates the same run record.
+
+| Argument | Type | Description |
+| --- | --- | --- |
+| `runId` | string | Run ID to resume (see `workflow_list`). |
+| `concurrency` | number | Max concurrent worker sessions. Default `4`, max `16`. |
+| `maxAgents` | number | Max total worker and synthesis sessions. |
+| `agent` | string | Default OpenCode agent for worker sessions. |
+| `model` | string | Default model in `provider/model` format. |
 
 ## Workflow Spec DSL
 
@@ -323,6 +341,8 @@ Loads a saved workflow by name and runs it.
 | `prompt` | string | Yes | Worker prompt. Make this self-contained. |
 | `agent` | string | No | OpenCode agent override for this task. |
 | `model` | string | No | Model override in `provider/model` format. |
+| `retries` | number | No | Extra attempts after the first failure. Clamped to `0..3`. |
+| `timeoutMs` | number | No | Per-attempt timeout in milliseconds. Clamped to `5s..30min`. |
 
 ## Persistence
 
@@ -349,6 +369,9 @@ The path is relative to the OpenCode worktree used by the current session.
 - `maxAgents` is clamped to `1..1000`.
 - Saved workflow names are sanitized before writing files.
 - Task failures are captured in the report instead of crashing the whole run when possible.
+- Task `retries` are clamped to `0..3` and `timeoutMs` to `5s..30min`.
+- Timed-out or aborted prompts are never re-sent within the same attempt, to avoid duplicating side effects.
+- Accumulated phase context is clipped before being passed to workers.
 
 ## Development
 

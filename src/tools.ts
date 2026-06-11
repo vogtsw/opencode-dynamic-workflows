@@ -2,9 +2,9 @@ import { tool } from "@opencode-ai/plugin"
 import type { SDKClient, RunnerConfig } from "./runner.js"
 import { runWorkflow } from "./runner.js"
 import { normalizeSpec, generateDefaultSpec, countTasks, validateOptions } from "./spec-parser.js"
-import { saveSpec, loadSpec, listSavedWorkflows, getSavedWorkflow, listRuns } from "./persistence.js"
-import { generateReport, generateDryRunReport, generateListOutput } from "./report.js"
-import type { WorkflowProgress, WorkflowSpec } from "./types.js"
+import { saveSpec, loadSpec, listSavedWorkflows, getSavedWorkflow, listRuns, loadRun } from "./persistence.js"
+import { generateReport, generateDryRunReport, generateListOutput, formatElapsed } from "./report.js"
+import type { TaskResult, WorkflowProgress, WorkflowSpec } from "./types.js"
 
 export interface ToolFactoryOptions {
   client: SDKClient
@@ -18,6 +18,35 @@ function progressTitle(progress: WorkflowProgress): string {
   const running = progress.taskRunning > 0 ? `, ${progress.taskRunning} running` : ""
   const taskPart = progress.taskTotal > 0 ? `${done}/${progress.taskTotal} done${running}${failed}` : progress.status
   return `Workflow ${taskPart}: ${progress.message}`
+}
+
+function renderTaskTree(progress: WorkflowProgress): string | undefined {
+  if (!progress.tasks || progress.tasks.length === 0) return undefined
+
+  const lines: string[] = []
+  let currentPhase = ""
+  const now = progress.updatedAt
+
+  for (const t of progress.tasks) {
+    if (t.phaseId !== currentPhase) {
+      currentPhase = t.phaseId
+      lines.push(`${t.phaseId}:`)
+    }
+    const icon =
+      t.status === "completed"
+        ? "[ok]  "
+        : t.status === "failed"
+          ? "[fail]"
+          : t.status === "running"
+            ? "[run] "
+            : t.status === "skipped"
+              ? "[skip]"
+              : "[..]  "
+    const elapsed = t.startedAt ? ` (${formatElapsed((t.finishedAt ?? now) - t.startedAt)})` : ""
+    lines.push(`  ${icon} ${t.taskId}${elapsed} - ${t.description}`)
+  }
+
+  return lines.join("\n")
 }
 
 function progressMetadata(progress: WorkflowProgress) {
@@ -37,14 +66,15 @@ function progressMetadata(progress: WorkflowProgress) {
     currentPhaseTitle: progress.currentPhaseTitle,
     currentTaskId: progress.currentTaskId,
     currentTaskDescription: progress.currentTaskDescription,
+    taskTree: renderTaskTree(progress),
     updatedAt: new Date(progress.updatedAt).toISOString(),
   }
 }
 
 function shouldToast(progress: WorkflowProgress): boolean {
   if (progress.status !== "running") return true
-  if (/^Phase \d+\/\d+:/.test(progress.message)) return true
-  return /^Task (completed|failed|skipped):/.test(progress.message)
+  if (/^Phase \d+\/\d+/.test(progress.message)) return true
+  return /^Task failed:/.test(progress.message)
 }
 
 async function notifyProgress(client: SDKClient, context: any, progress: WorkflowProgress): Promise<void> {
@@ -228,6 +258,70 @@ export function createWorkflowRunSavedTool(opts: ToolFactoryOptions) {
       return {
         title: finalTitle(result.progress),
         output: generateReport(result),
+        metadata: result.progress ? progressMetadata(result.progress) : undefined,
+      }
+    },
+  })
+}
+
+export function createWorkflowResumeTool(opts: ToolFactoryOptions) {
+  const { client } = opts
+
+  return tool({
+    description:
+      "Resume a previous workflow run by runId. Completed tasks are skipped and their saved outputs are reused; failed and skipped tasks are re-executed. Use workflow_list to find recent runIds.",
+    args: {
+      runId: tool.schema.string().describe("Run ID of the run to resume (see workflow_list)"),
+      concurrency: tool.schema.number().optional().describe("Max concurrent worker sessions. Default 4, max 16."),
+      maxAgents: tool.schema.number().optional().describe("Max total agent sessions across the run. Default 100, max 1000."),
+      agent: tool.schema.string().optional().describe("Default OpenCode agent for worker sessions."),
+      model: tool.schema.string().optional().describe("Default provider/model for worker sessions."),
+    },
+    async execute(args, context) {
+      const { runId, concurrency, maxAgents, agent, model } = args
+
+      const run = await loadRun(context.worktree, runId)
+      if (!run) {
+        return `**Error**: No run found with id "${runId}". Use workflow_list to see recent runs.`
+      }
+      if (run.status === "completed") {
+        return `Run \`${runId}\` already completed successfully. Nothing to resume.\n\n${generateReport(run)}`
+      }
+
+      const completed = new Map<string, TaskResult>()
+      for (const phaseResult of run.phaseResults) {
+        for (const taskResult of phaseResult.taskResults) {
+          if (taskResult.status === "completed") {
+            completed.set(taskResult.taskId, taskResult)
+          }
+        }
+      }
+
+      const { concurrency: c, maxAgents: m } = validateOptions(concurrency, maxAgents)
+
+      const runnerConfig: RunnerConfig = {
+        client,
+        directory: context.directory,
+        worktree: context.worktree,
+        sessionID: context.sessionID,
+        concurrency: c,
+        maxAgents: m,
+        defaultAgent: agent ?? context.agent,
+        defaultModel: model,
+        abort: context.abort,
+        resume: {
+          runId: run.runId,
+          startedAt: run.startedAt,
+          completed,
+        },
+        onProgress: (progress) => notifyProgress(client, context, progress),
+      }
+
+      const result = await runWorkflow(run.spec, runnerConfig)
+
+      return {
+        title: finalTitle(result.progress),
+        output: `Resumed run \`${runId}\` (${completed.size} task(s) reused from previous run).\n\n${generateReport(result)}`,
         metadata: result.progress ? progressMetadata(result.progress) : undefined,
       }
     },

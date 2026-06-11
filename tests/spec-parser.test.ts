@@ -243,6 +243,54 @@ describe("validateOptions", () => {
   })
 })
 
+describe("task retries and timeoutMs", () => {
+  it("parses and clamps retries", () => {
+    const spec = normalizeSpec({
+      name: "t",
+      goal: "g",
+      phases: [
+        {
+          id: "p1",
+          tasks: [
+            { id: "a", prompt: "x", retries: 2 },
+            { id: "b", prompt: "x", retries: 99 },
+            { id: "c", prompt: "x", retries: -1 },
+            { id: "d", prompt: "x" },
+          ],
+        },
+      ],
+    })
+    const tasks = spec.phases[0].tasks
+    expect(tasks[0].retries).toBe(2)
+    expect(tasks[1].retries).toBe(3)
+    expect(tasks[2].retries).toBe(0)
+    expect(tasks[3].retries).toBeUndefined()
+  })
+
+  it("parses and clamps timeoutMs", () => {
+    const spec = normalizeSpec({
+      name: "t",
+      goal: "g",
+      phases: [
+        {
+          id: "p1",
+          tasks: [
+            { id: "a", prompt: "x", timeoutMs: 60000 },
+            { id: "b", prompt: "x", timeoutMs: 1 },
+            { id: "c", prompt: "x", timeoutMs: 99999999 },
+            { id: "d", prompt: "x" },
+          ],
+        },
+      ],
+    })
+    const tasks = spec.phases[0].tasks
+    expect(tasks[0].timeoutMs).toBe(60000)
+    expect(tasks[1].timeoutMs).toBe(5000)
+    expect(tasks[2].timeoutMs).toBe(1800000)
+    expect(tasks[3].timeoutMs).toBeUndefined()
+  })
+})
+
 describe("countTasks", () => {
   it("counts tasks without synthesis", () => {
     const spec = generateDefaultSpec("test")

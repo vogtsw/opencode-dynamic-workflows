@@ -11,6 +11,7 @@ export function generateReport(result) {
     lines.push(`**Started**: ${new Date(startedAt).toISOString()}`);
     lines.push(`**Run ID**: \`${runId}\``);
     lines.push("");
+    lines.push(...generateTimeline(result));
     for (const phase of phaseResults) {
         const pIcon = phase.status === "completed" ? "[ok]" : phase.status === "failed" ? "[fail]" : "[partial]";
         lines.push(`## Phase: ${phase.title} ${pIcon}`);
@@ -22,7 +23,8 @@ export function generateReport(result) {
             for (const tr of phase.taskResults) {
                 const tIcon = tr.status === "completed" ? "[ok]" : tr.status === "failed" ? "[fail]" : tr.status === "running" ? "[run]" : "[skip]";
                 const sid = tr.sessionId ? `\`${truncate(tr.sessionId, 12)}\`` : "-";
-                lines.push(`| ${tr.taskId} | ${sid} | ${tIcon} ${tr.status} | ${formatElapsed(tr.elapsedMs)} |`);
+                const attempts = tr.attempts && tr.attempts > 1 ? ` (x${tr.attempts})` : "";
+                lines.push(`| ${tr.taskId} | ${sid} | ${tIcon} ${tr.status}${attempts} | ${formatElapsed(tr.elapsedMs)} |`);
             }
             lines.push("");
             for (const tr of phase.taskResults) {
@@ -98,7 +100,35 @@ export function generateListOutput(workflows) {
     }
     return lines.join("\n");
 }
-function formatElapsed(ms) {
+export function generateTimeline(result) {
+    const items = [];
+    for (const phase of result.phaseResults) {
+        for (const tr of phase.taskResults) {
+            if (tr.startedAt && tr.finishedAt && tr.finishedAt > tr.startedAt) {
+                items.push({ label: tr.taskId, startedAt: tr.startedAt, finishedAt: tr.finishedAt });
+            }
+        }
+    }
+    if (items.length < 2)
+        return [];
+    const base = Math.min(...items.map((i) => i.startedAt));
+    const end = Math.max(...items.map((i) => i.finishedAt));
+    const total = Math.max(1, end - base);
+    const width = 40;
+    const labelWidth = Math.min(24, Math.max(...items.map((i) => i.label.length)));
+    const lines = ["## Timeline", "", "```text"];
+    for (const item of items) {
+        const startCol = Math.min(width - 1, Math.floor(((item.startedAt - base) / total) * width));
+        const endCol = Math.max(startCol + 1, Math.min(width, Math.ceil(((item.finishedAt - base) / total) * width)));
+        const bar = ".".repeat(startCol) + "#".repeat(endCol - startCol) + ".".repeat(width - endCol);
+        const label = item.label.length > labelWidth ? item.label.slice(0, labelWidth - 1) + "~" : item.label.padEnd(labelWidth);
+        lines.push(`${label} |${bar}| ${formatElapsed(item.finishedAt - item.startedAt)}`);
+    }
+    lines.push("```");
+    lines.push("");
+    return lines;
+}
+export function formatElapsed(ms) {
     if (ms < 1000)
         return `${ms}ms`;
     if (ms < 60000)

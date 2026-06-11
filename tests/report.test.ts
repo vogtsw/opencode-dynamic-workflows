@@ -128,6 +128,34 @@ describe("generateReport", () => {
     const report = generateReport(result)
     expect(report).toContain("truncated")
   })
+
+  it("renders a timeline when tasks have timing data", () => {
+    const result = makeResult()
+    const base = Date.now()
+    result.phaseResults[0].taskResults[0].startedAt = base
+    result.phaseResults[0].taskResults[0].finishedAt = base + 1500
+    result.phaseResults[0].taskResults[1].startedAt = base
+    result.phaseResults[0].taskResults[1].finishedAt = base + 2200
+    result.phaseResults[1].taskResults[0].startedAt = base + 2200
+    result.phaseResults[1].taskResults[0].finishedAt = base + 5200
+    const report = generateReport(result)
+    expect(report).toContain("## Timeline")
+    expect(report).toContain("#")
+    expect(report).toContain("research_background")
+  })
+
+  it("omits the timeline when timing data is missing", () => {
+    const result = makeResult()
+    const report = generateReport(result)
+    expect(report).not.toContain("## Timeline")
+  })
+
+  it("shows retry attempts in the task table", () => {
+    const result = makeResult()
+    result.phaseResults[0].taskResults[0].attempts = 3
+    const report = generateReport(result)
+    expect(report).toContain("(x3)")
+  })
 })
 
 describe("generateDryRunReport", () => {

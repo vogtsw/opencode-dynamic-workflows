@@ -21,10 +21,19 @@ async function tempRoot() {
   return root
 }
 
-function createMockClient(options: { delayMs?: number; failTask?: string; nativeTaskError?: string } = {}) {
+function createMockClient(
+  options: {
+    delayMs?: number
+    failTask?: string
+    nativeTaskError?: string
+    failAttempts?: { marker: string; times: number }
+    slowMarker?: { marker: string; delayMs: number }
+  } = {},
+) {
   let nextSession = 0
   let active = 0
   let maxActive = 0
+  let markerFailures = 0
   const prompts: Array<any> = []
 
   const client = {
@@ -41,6 +50,23 @@ function createMockClient(options: { delayMs?: number; failTask?: string; native
         active -= 1
 
         const text = input.body.parts[0].text ?? input.body.parts[0].prompt
+
+        if (options.slowMarker && text.includes(options.slowMarker.marker)) {
+          await Bun.sleep(options.slowMarker.delayMs)
+        }
+
+        if (options.failAttempts && text.includes(options.failAttempts.marker)) {
+          markerFailures += 1
+          if (markerFailures <= options.failAttempts.times) {
+            return {
+              data: {
+                info: { error: { data: { message: `transient failure ${markerFailures}` } } },
+                parts: [],
+              },
+            }
+          }
+        }
+
         if (options.failTask && text.includes(options.failTask)) {
           throw new Error(`boom ${options.failTask}`)
         }
@@ -272,5 +298,210 @@ describe("runWorkflow", () => {
     expect(result.progress?.taskRunning).toBe(0)
     expect(result.progress?.taskFailed).toBe(0)
     expect(sawRunningRecord).toBe(true)
+  })
+
+  it("records startedAt/finishedAt timing on task results and progress items", async () => {
+    const spec = normalizeSpec({
+      name: "timing-test",
+      goal: "test timing",
+      phases: [{ id: "p1", tasks: [{ id: "t1", prompt: "task 1" }] }],
+    })
+    const root = await tempRoot()
+    const { client } = createMockClient({ delayMs: 10 })
+
+    const result = await runWorkflow(spec, {
+      client,
+      directory: root,
+      worktree: root,
+      sessionID: "parent",
+    })
+
+    const tr = result.phaseResults[0].taskResults[0]
+    expect(tr.startedAt).toBeGreaterThan(0)
+    expect(tr.finishedAt!).toBeGreaterThanOrEqual(tr.startedAt!)
+    expect(tr.attempts).toBe(1)
+
+    const item = result.progress?.tasks?.find((t) => t.taskId === "t1")
+    expect(item?.status).toBe("completed")
+    expect(item?.startedAt).toBeGreaterThan(0)
+    expect(item?.finishedAt!).toBeGreaterThanOrEqual(item!.startedAt!)
+  })
+
+  it("retries failed tasks up to the configured retries", async () => {
+    const spec = normalizeSpec({
+      name: "retry-test",
+      goal: "test retry",
+      phases: [{ id: "p1", tasks: [{ id: "flaky", prompt: "flaky-marker task", retries: 2 }] }],
+    })
+    const root = await tempRoot()
+    const { client } = createMockClient({ failAttempts: { marker: "flaky-marker", times: 2 } })
+
+    const result = await runWorkflow(spec, {
+      client,
+      directory: root,
+      worktree: root,
+      sessionID: "parent",
+    })
+
+    expect(result.status).toBe("completed")
+    const tr = result.phaseResults[0].taskResults[0]
+    expect(tr.status).toBe("completed")
+    expect(tr.attempts).toBe(3)
+  })
+
+  it("fails a task when all retry attempts are exhausted", async () => {
+    const spec = normalizeSpec({
+      name: "retry-exhausted-test",
+      goal: "test retry exhaustion",
+      phases: [{ id: "p1", tasks: [{ id: "flaky", prompt: "flaky-marker task", retries: 1 }] }],
+    })
+    const root = await tempRoot()
+    const { client } = createMockClient({ failAttempts: { marker: "flaky-marker", times: 99 } })
+
+    const result = await runWorkflow(spec, {
+      client,
+      directory: root,
+      worktree: root,
+      sessionID: "parent",
+    })
+
+    const tr = result.phaseResults[0].taskResults[0]
+    expect(tr.status).toBe("failed")
+    expect(tr.attempts).toBe(2)
+    expect(tr.error).toContain("transient failure")
+  })
+
+  it("fails a task that exceeds its timeout", async () => {
+    // Bypass normalizeSpec so the test can use a sub-second timeout.
+    const spec = {
+      name: "timeout-test",
+      goal: "test timeout",
+      phases: [
+        {
+          id: "p1",
+          title: "p1",
+          strategy: "sequential" as const,
+          tasks: [{ id: "slow", description: "slow task", prompt: "slow-marker task", timeoutMs: 30 }],
+        },
+      ],
+    }
+    const root = await tempRoot()
+    const { client } = createMockClient({ slowMarker: { marker: "slow-marker", delayMs: 200 } })
+
+    const result = await runWorkflow(spec, {
+      client,
+      directory: root,
+      worktree: root,
+      sessionID: "parent",
+    })
+
+    const tr = result.phaseResults[0].taskResults[0]
+    expect(tr.status).toBe("failed")
+    expect(tr.error).toContain("timed out")
+  })
+
+  it("resumes a partial run, reusing completed task outputs", async () => {
+    const spec = normalizeSpec({
+      name: "resume-test",
+      goal: "test resume",
+      phases: [
+        {
+          id: "p1",
+          strategy: "parallel",
+          tasks: [
+            { id: "good", prompt: "good task" },
+            { id: "bad", prompt: "always-fail-marker task" },
+          ],
+        },
+      ],
+    })
+    const root = await tempRoot()
+
+    const first = createMockClient({ failAttempts: { marker: "always-fail-marker", times: 99 } })
+    const firstRun = await runWorkflow(spec, {
+      client: first.client,
+      directory: root,
+      worktree: root,
+      sessionID: "parent",
+    })
+    expect(firstRun.status).toBe("partial")
+
+    const completed = new Map(
+      firstRun.phaseResults
+        .flatMap((p) => p.taskResults)
+        .filter((t) => t.status === "completed")
+        .map((t) => [t.taskId, t] as const),
+    )
+    expect(completed.has("good")).toBe(true)
+
+    const second = createMockClient()
+    const resumed = await runWorkflow(spec, {
+      client: second.client,
+      directory: root,
+      worktree: root,
+      sessionID: "parent",
+      resume: {
+        runId: firstRun.runId,
+        startedAt: firstRun.startedAt,
+        completed,
+      },
+    })
+
+    expect(resumed.runId).toBe(firstRun.runId)
+    expect(resumed.status).toBe("completed")
+    // Only the previously failed task should be re-executed.
+    expect(second.prompts).toHaveLength(1)
+    expect(promptText(second.prompts[0])).toContain("always-fail-marker")
+    const reused = resumed.phaseResults[0].taskResults.find((t) => t.taskId === "good")
+    expect(reused?.output).toContain("output from")
+  })
+
+  it("truncates oversized sequential context", async () => {
+    const spec = normalizeSpec({
+      name: "context-clip-test",
+      goal: "test context clipping",
+      phases: [
+        {
+          id: "p1",
+          strategy: "sequential",
+          tasks: [
+            { id: "t1", prompt: "first task" },
+            { id: "t2", prompt: "second task" },
+          ],
+        },
+      ],
+    })
+    const root = await tempRoot()
+
+    let nextSession = 0
+    const prompts: any[] = []
+    const client = {
+      session: {
+        async create() {
+          nextSession += 1
+          return { data: { id: `session-${nextSession}` } }
+        },
+        async prompt(input: any) {
+          prompts.push(input)
+          return {
+            data: {
+              info: {},
+              parts: [{ type: "text", text: "y".repeat(10000) }],
+            },
+          }
+        },
+      },
+    } as any
+
+    await runWorkflow(spec, {
+      client,
+      directory: root,
+      worktree: root,
+      sessionID: "parent",
+    })
+
+    const secondPrompt = prompts[1].body.parts[0].text ?? prompts[1].body.parts[0].prompt
+    expect(secondPrompt).toContain("(truncated)")
+    expect(secondPrompt.length).toBeLessThan(10000)
   })
 })

@@ -18,6 +18,10 @@ export interface Task {
   prompt: string
   agent?: string
   model?: string
+  /** Extra attempts after the first failure. Clamped to 0..3. */
+  retries?: number
+  /** Per-attempt timeout in milliseconds. Clamped to 5s..30min. */
+  timeoutMs?: number
 }
 
 export type TaskStatus = "pending" | "running" | "completed" | "failed" | "skipped"
@@ -29,7 +33,19 @@ export interface TaskResult {
   status: TaskStatus
   output: string
   elapsedMs: number
+  startedAt?: number
+  finishedAt?: number
+  attempts?: number
   error?: string
+}
+
+export interface TaskProgressItem {
+  phaseId: string
+  taskId: string
+  description: string
+  status: TaskStatus
+  startedAt?: number
+  finishedAt?: number
 }
 
 export interface PhaseResult {
@@ -69,6 +85,7 @@ export interface WorkflowProgress {
   currentPhaseTitle?: string
   currentTaskId?: string
   currentTaskDescription?: string
+  tasks?: TaskProgressItem[]
   updatedAt: number
 }
 

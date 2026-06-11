@@ -49,6 +49,23 @@ export declare function createWorkflowRunSavedTool(opts: ToolFactoryOptions): {
         model?: string | undefined;
     }, context: import("@opencode-ai/plugin").ToolContext): Promise<import("@opencode-ai/plugin").ToolResult>;
 };
+export declare function createWorkflowResumeTool(opts: ToolFactoryOptions): {
+    description: string;
+    args: {
+        runId: import("zod").ZodString;
+        concurrency: import("zod").ZodOptional<import("zod").ZodNumber>;
+        maxAgents: import("zod").ZodOptional<import("zod").ZodNumber>;
+        agent: import("zod").ZodOptional<import("zod").ZodString>;
+        model: import("zod").ZodOptional<import("zod").ZodString>;
+    };
+    execute(args: {
+        runId: string;
+        concurrency?: number | undefined;
+        maxAgents?: number | undefined;
+        agent?: string | undefined;
+        model?: string | undefined;
+    }, context: import("@opencode-ai/plugin").ToolContext): Promise<import("@opencode-ai/plugin").ToolResult>;
+};
 export declare function createWorkflowShowTool(_opts: ToolFactoryOptions): {
     description: string;
     args: {

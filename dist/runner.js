@@ -5,7 +5,48 @@ const DISABLED_TOOLS = {
     workflow_list: false,
     workflow_run_saved: false,
     workflow_show: false,
+    workflow_resume: false,
 };
+/** Max chars of a single sequential task output carried into the next task's context. */
+const SEQ_TASK_CONTEXT_LIMIT = 4000;
+/** Max chars of a single task output carried into the next phase's context. */
+const PHASE_TASK_CONTEXT_LIMIT = 1000;
+/** Max chars of a synthesis output carried into the next phase's context. */
+const SYNTHESIS_CONTEXT_LIMIT = 8000;
+/** Hard cap on the accumulated context passed to any worker. */
+const TOTAL_CONTEXT_LIMIT = 48000;
+class TaskTimeoutError extends Error {
+    constructor(taskId, timeoutMs) {
+        super(`Task "${taskId}" timed out after ${Math.round(timeoutMs / 1000)}s`);
+        this.name = "TaskTimeoutError";
+    }
+}
+function withTimeout(promise, timeoutMs, taskId) {
+    if (!timeoutMs)
+        return promise;
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new TaskTimeoutError(taskId, timeoutMs)), timeoutMs);
+        promise.then((value) => {
+            clearTimeout(timer);
+            resolve(value);
+        }, (err) => {
+            clearTimeout(timer);
+            reject(err);
+        });
+    });
+}
+function clip(text, limit) {
+    if (text.length <= limit)
+        return text;
+    return text.slice(0, limit) + "\n... (truncated)";
+}
+function clipTotalContext(context) {
+    if (context.length <= TOTAL_CONTEXT_LIMIT)
+        return context;
+    const headSize = 8000;
+    const tail = context.slice(context.length - (TOTAL_CONTEXT_LIMIT - headSize));
+    return `${context.slice(0, headSize)}\n\n... (older context truncated) ...\n\n${tail}`;
+}
 function parseModel(model) {
     if (!model)
         return undefined;
@@ -47,96 +88,131 @@ function extractNativeTaskOutput(parts) {
         error: typeof error === "string" ? error : undefined,
     };
 }
-async function runTask(client, task, directory, parentID, defaultAgent, defaultModel, phaseContext, abort, onProgress) {
-    const start = Date.now();
-    const agent = task.agent ?? defaultAgent ?? "general";
-    const model = task.model ?? defaultModel;
-    let sessionId = "";
+async function runTaskAttempt(client, task, fullPrompt, agent, model, directory, parentID, abort) {
+    const session = await client.session.create({
+        body: { parentID, title: task.description },
+        query: { directory },
+    });
+    const sessionId = session.data.id;
+    let response;
     try {
-        if (abort.aborted) {
-            return {
-                taskId: task.id,
-                sessionId,
-                status: "skipped",
-                output: "",
-                elapsedMs: 0,
-            };
-        }
-        await onProgress?.(task, "running", "");
-        const session = await client.session.create({
-            body: { parentID, title: task.description },
+        response = await withTimeout(client.session.prompt({
+            path: { id: sessionId },
             query: { directory },
-        });
-        sessionId = session.data.id;
-        await onProgress?.(task, "running", sessionId);
-        let fullPrompt = task.prompt;
-        if (phaseContext) {
-            fullPrompt = `${phaseContext}\n\n---\n\n${task.prompt}`;
-        }
-        let response;
-        try {
-            response = await client.session.prompt({
-                path: { id: sessionId },
-                query: { directory },
-                body: {
-                    agent,
-                    model: parseModel(model),
-                    tools: { ...DISABLED_TOOLS, task: false },
-                    parts: [
-                        {
-                            type: "subtask",
-                            agent,
-                            description: task.description,
-                            prompt: fullPrompt,
-                            ...(model ? { model: parseModel(model) } : {}),
-                        },
-                    ],
-                },
-            });
-        }
-        catch (err) {
-            if (abort.aborted)
-                throw err;
-            response = await client.session.prompt({
-                path: { id: sessionId },
-                query: { directory },
-                body: {
-                    agent,
-                    model: parseModel(model),
-                    tools: DISABLED_TOOLS,
-                    parts: [{ type: "text", text: fullPrompt }],
-                },
-            });
-        }
-        const elapsed = Date.now() - start;
-        const parts = response.data.parts;
-        const nativeTask = extractNativeTaskOutput(parts);
-        const output = nativeTask.output || extractText(parts);
-        const info = response.data.info;
-        const failed = info.error !== undefined || nativeTask.failed || abort.aborted;
-        const result = {
-            taskId: task.id,
-            sessionId: nativeTask.sessionId ?? sessionId,
-            status: failed ? "failed" : "completed",
-            output,
-            elapsedMs: elapsed,
-            error: failed ? info.error?.data?.message ?? nativeTask.error ?? (abort.aborted ? "Task aborted" : "Task failed") : undefined,
-        };
-        await onProgress?.(task, result.status, sessionId);
-        return result;
+            body: {
+                agent,
+                model: parseModel(model),
+                tools: { ...DISABLED_TOOLS, task: false },
+                parts: [
+                    {
+                        type: "subtask",
+                        agent,
+                        description: task.description,
+                        prompt: fullPrompt,
+                        ...(model ? { model: parseModel(model) } : {}),
+                    },
+                ],
+            },
+        }), task.timeoutMs, task.id);
     }
     catch (err) {
-        const result = {
+        // Do not re-send the prompt after an abort or timeout: the first request may
+        // still be executing and a resend could duplicate side effects.
+        if (abort.aborted || err instanceof TaskTimeoutError)
+            throw err;
+        response = await withTimeout(client.session.prompt({
+            path: { id: sessionId },
+            query: { directory },
+            body: {
+                agent,
+                model: parseModel(model),
+                tools: DISABLED_TOOLS,
+                parts: [{ type: "text", text: fullPrompt }],
+            },
+        }), task.timeoutMs, task.id);
+    }
+    const parts = response.data.parts;
+    const nativeTask = extractNativeTaskOutput(parts);
+    const output = nativeTask.output || extractText(parts);
+    const info = response.data.info;
+    const failed = info.error !== undefined || nativeTask.failed || abort.aborted;
+    return {
+        output,
+        sessionId: nativeTask.sessionId ?? sessionId,
+        failed,
+        error: failed
+            ? info.error?.data?.message ?? nativeTask.error ?? (abort.aborted ? "Task aborted" : "Task failed")
+            : undefined,
+    };
+}
+async function runTask(client, task, directory, parentID, defaultAgent, defaultModel, phaseContext, abort, onProgress, cached) {
+    if (cached && cached.status === "completed") {
+        await onProgress?.(task, "completed", cached.sessionId);
+        return { ...cached };
+    }
+    const startedAt = Date.now();
+    const agent = task.agent ?? defaultAgent ?? "general";
+    const model = task.model ?? defaultModel;
+    const maxAttempts = 1 + (task.retries ?? 0);
+    let sessionId = "";
+    let lastError;
+    if (abort.aborted) {
+        return {
             taskId: task.id,
             sessionId,
-            status: "failed",
+            status: "skipped",
             output: "",
-            elapsedMs: Date.now() - start,
-            error: err instanceof Error ? err.message : String(err),
+            elapsedMs: 0,
+            startedAt,
+            finishedAt: startedAt,
         };
-        await onProgress?.(task, "failed", sessionId);
-        return result;
     }
+    await onProgress?.(task, "running", "");
+    let fullPrompt = task.prompt;
+    if (phaseContext) {
+        fullPrompt = `${clipTotalContext(phaseContext)}\n\n---\n\n${task.prompt}`;
+    }
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+            const attemptResult = await runTaskAttempt(client, task, fullPrompt, agent, model, directory, parentID, abort);
+            sessionId = attemptResult.sessionId;
+            if (!attemptResult.failed) {
+                const finishedAt = Date.now();
+                const result = {
+                    taskId: task.id,
+                    sessionId,
+                    status: "completed",
+                    output: attemptResult.output,
+                    elapsedMs: finishedAt - startedAt,
+                    startedAt,
+                    finishedAt,
+                    attempts: attempt,
+                };
+                await onProgress?.(task, "completed", sessionId);
+                return result;
+            }
+            lastError = attemptResult.error ?? "Task failed";
+        }
+        catch (err) {
+            lastError = err instanceof Error ? err.message : String(err);
+        }
+        if (abort.aborted)
+            break;
+    }
+    const finishedAt = Date.now();
+    const result = {
+        taskId: task.id,
+        sessionId,
+        status: "failed",
+        output: "",
+        elapsedMs: finishedAt - startedAt,
+        startedAt,
+        finishedAt,
+        attempts: maxAttempts,
+        error: lastError ?? (abort.aborted ? "Task aborted" : "Task failed"),
+    };
+    await onProgress?.(task, "failed", sessionId);
+    return result;
 }
 async function runSynthesis(client, phase, taskResults, directory, parentID, defaultAgent, defaultModel, abort) {
     const start = Date.now();
@@ -163,7 +239,7 @@ async function runSynthesis(client, phase, taskResults, directory, parentID, def
     const output = extractText(response.data.parts);
     return { output, sessionId, elapsedMs: elapsed };
 }
-async function executeParallelTasks(client, tasks, directory, parentID, defaultAgent, defaultModel, phaseContext, concurrency, abort, onTaskProgress) {
+async function executeParallelTasks(client, tasks, directory, parentID, defaultAgent, defaultModel, phaseContext, concurrency, abort, onTaskProgress, getCached) {
     const results = [];
     const pending = [...tasks];
     async function runNext() {
@@ -171,7 +247,7 @@ async function executeParallelTasks(client, tasks, directory, parentID, defaultA
             if (abort.aborted)
                 break;
             const task = pending.shift();
-            const result = await runTask(client, task, directory, parentID, defaultAgent, defaultModel, phaseContext, abort, onTaskProgress);
+            const result = await runTask(client, task, directory, parentID, defaultAgent, defaultModel, phaseContext, abort, onTaskProgress, getCached?.(task));
             results.push(result);
         }
     }
@@ -191,7 +267,7 @@ async function executeParallelTasks(client, tasks, directory, parentID, defaultA
     }
     return results;
 }
-async function executePhase(client, phase, directory, parentID, defaultAgent, defaultModel, phaseContext, concurrency, abort, onTaskProgress, onSynthesisProgress) {
+async function executePhase(client, phase, directory, parentID, defaultAgent, defaultModel, phaseContext, concurrency, abort, onTaskProgress, onSynthesisProgress, getCached) {
     const start = Date.now();
     const strategy = phase.strategy ?? "parallel";
     let taskResults;
@@ -210,15 +286,15 @@ async function executePhase(client, phase, directory, parentID, defaultAgent, de
                 await onTaskProgress?.(task, "skipped", "");
                 continue;
             }
-            const result = await runTask(client, task, directory, parentID, defaultAgent, defaultModel, phaseContext, abort, onTaskProgress);
+            const result = await runTask(client, task, directory, parentID, defaultAgent, defaultModel, phaseContext, abort, onTaskProgress, getCached?.(task));
             taskResults.push(result);
             if (result.output) {
-                phaseContext = `${phaseContext}\n\n## Previous Task Output (${task.id})\n${result.output}`;
+                phaseContext = clipTotalContext(`${phaseContext}\n\n## Previous Task Output (${task.id})\n${clip(result.output, SEQ_TASK_CONTEXT_LIMIT)}`);
             }
         }
     }
     else {
-        taskResults = await executeParallelTasks(client, phase.tasks, directory, parentID, defaultAgent, defaultModel, phaseContext, concurrency, abort, onTaskProgress);
+        taskResults = await executeParallelTasks(client, phase.tasks, directory, parentID, defaultAgent, defaultModel, phaseContext, concurrency, abort, onTaskProgress, getCached);
     }
     let synthesisOutput;
     let synthesisSessionId;
@@ -260,31 +336,33 @@ function buildPhaseContext(previousPhases) {
     for (const pr of previousPhases) {
         parts.push(`\n## ${pr.title}`);
         if (pr.synthesisOutput) {
-            parts.push(pr.synthesisOutput);
+            parts.push(clip(pr.synthesisOutput, SYNTHESIS_CONTEXT_LIMIT));
         }
         else {
             for (const tr of pr.taskResults) {
                 if (tr.output) {
-                    parts.push(`### ${tr.taskId}\n${tr.output.slice(0, 1000)}`);
+                    parts.push(`### ${tr.taskId}\n${clip(tr.output, PHASE_TASK_CONTEXT_LIMIT)}`);
                 }
             }
         }
     }
-    return parts.join("\n");
+    return clipTotalContext(parts.join("\n"));
 }
 export async function runWorkflow(spec, config) {
-    const { client, directory, worktree, sessionID, defaultAgent, defaultModel } = config;
+    const { client, directory, worktree, sessionID, defaultAgent, defaultModel, resume } = config;
     const { concurrency, maxAgents } = validateOptions(config.concurrency, config.maxAgents);
     const totalTasks = countTasks(spec);
     if (totalTasks > maxAgents) {
         throw new Error(`Workflow requires ${totalTasks} agent calls but maxAgents is ${maxAgents}`);
     }
-    const runId = generateRunId();
-    const startedAt = Date.now();
+    const runId = resume?.runId ?? generateRunId();
+    const startedAt = resume?.startedAt ?? Date.now();
+    const executionStartedAt = Date.now();
     const abort = config.abort ?? new AbortController().signal;
     const phaseResults = [];
     const taskTotal = spec.phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
     const taskStatuses = new Map();
+    const taskTimes = new Map();
     function taskKey(phase, task) {
         return `${phase.id}/${task.id}`;
     }
@@ -304,6 +382,24 @@ export async function runWorkflow(spec, config) {
                 taskSkipped += 1;
         }
         return { taskCompleted, taskRunning, taskFailed, taskSkipped };
+    }
+    function progressTasks() {
+        const items = [];
+        for (const phase of spec.phases) {
+            for (const task of phase.tasks) {
+                const key = taskKey(phase, task);
+                const timing = taskTimes.get(key);
+                items.push({
+                    phaseId: phase.id,
+                    taskId: task.id,
+                    description: task.description,
+                    status: taskStatuses.get(key) ?? "pending",
+                    startedAt: timing?.startedAt,
+                    finishedAt: timing?.finishedAt,
+                });
+            }
+        }
+        return items;
     }
     const result = {
         runId,
@@ -330,9 +426,10 @@ export async function runWorkflow(spec, config) {
             currentPhaseTitle: patch.currentPhaseTitle,
             currentTaskId: patch.currentTaskId,
             currentTaskDescription: patch.currentTaskDescription,
+            tasks: progressTasks(),
             updatedAt: Date.now(),
         };
-        result.elapsedMs = Date.now() - startedAt;
+        result.elapsedMs = Date.now() - executionStartedAt;
         result.progress = progress;
         await saveRun(worktree, result);
         try {
@@ -342,7 +439,7 @@ export async function runWorkflow(spec, config) {
             // Progress UI updates are best-effort; persisted run state is the source of truth.
         }
     }
-    await publish(`Starting workflow "${spec.name}"`);
+    await publish(resume ? `Resuming workflow "${spec.name}"` : `Starting workflow "${spec.name}"`);
     for (let i = 0; i < spec.phases.length; i += 1) {
         const phase = spec.phases[i];
         await publish(`Phase ${i + 1}/${spec.phases.length}: ${phase.title}`, {
@@ -351,8 +448,15 @@ export async function runWorkflow(spec, config) {
             currentPhaseTitle: phase.title,
         });
         const phaseContext = buildPhaseContext(phaseResults);
-        const result = await executePhase(client, phase, directory, sessionID, defaultAgent, defaultModel, phaseContext, concurrency, abort, async (task, status) => {
-            taskStatuses.set(taskKey(phase, task), status);
+        const phaseResult = await executePhase(client, phase, directory, sessionID, defaultAgent, defaultModel, phaseContext, concurrency, abort, async (task, status) => {
+            const key = taskKey(phase, task);
+            taskStatuses.set(key, status);
+            const timing = taskTimes.get(key) ?? {};
+            if (status === "running" && timing.startedAt === undefined)
+                timing.startedAt = Date.now();
+            if (status !== "running" && status !== "pending")
+                timing.finishedAt = Date.now();
+            taskTimes.set(key, timing);
             const verb = status === "running" ? "running" : status === "completed" ? "completed" : status === "failed" ? "failed" : "skipped";
             await publish(`Task ${verb}: ${task.description}`, {
                 phaseIndex: i + 1,
@@ -367,15 +471,15 @@ export async function runWorkflow(spec, config) {
                 currentPhaseId: phase.id,
                 currentPhaseTitle: phase.title,
             });
-        });
-        phaseResults.push(result);
-        await publish(`Phase ${i + 1}/${spec.phases.length} finished: ${phase.title} (${result.status})`, {
+        }, resume ? (task) => resume.completed.get(task.id) : undefined);
+        phaseResults.push(phaseResult);
+        await publish(`Phase ${i + 1}/${spec.phases.length} finished: ${phase.title} (${phaseResult.status})`, {
             phaseIndex: i + 1,
             currentPhaseId: phase.id,
             currentPhaseTitle: phase.title,
         });
     }
-    const elapsed = Date.now() - startedAt;
+    const elapsed = Date.now() - executionStartedAt;
     const failedPhases = phaseResults.filter((p) => p.status === "failed").length;
     const completedPhases = phaseResults.filter((p) => p.status === "completed").length;
     let status;

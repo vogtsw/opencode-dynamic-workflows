@@ -4,6 +4,9 @@ export const DEFAULT_CONCURRENCY = 4
 export const MAX_CONCURRENCY = 16
 export const DEFAULT_MAX_AGENTS = 100
 export const MAX_MAX_AGENTS = 1000
+export const MAX_TASK_RETRIES = 3
+export const MIN_TASK_TIMEOUT_MS = 5_000
+export const MAX_TASK_TIMEOUT_MS = 1_800_000
 
 export class SpecValidationError extends Error {
   constructor(
@@ -136,7 +139,17 @@ function normalizeTask(raw: unknown, index: number, phaseId: string, issues: str
     model = obj.model.trim()
   }
 
-  return { id, description, prompt, agent, model }
+  let retries: number | undefined
+  if (typeof obj.retries === "number" && Number.isFinite(obj.retries)) {
+    retries = Math.max(0, Math.min(Math.floor(obj.retries), MAX_TASK_RETRIES))
+  }
+
+  let timeoutMs: number | undefined
+  if (typeof obj.timeoutMs === "number" && Number.isFinite(obj.timeoutMs)) {
+    timeoutMs = Math.max(MIN_TASK_TIMEOUT_MS, Math.min(Math.floor(obj.timeoutMs), MAX_TASK_TIMEOUT_MS))
+  }
+
+  return { id, description, prompt, agent, model, retries, timeoutMs }
 }
 
 export function generateDefaultSpec(goal: string): WorkflowSpec {
